@@ -7,12 +7,11 @@ from sqlalchemy import (
     DateTime,
     Boolean,
     Text,
-    JSON,
     Integer,
     Enum as SQLEnum,
     Index
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import validates
 from sqlalchemy.sql import func
 
@@ -71,21 +70,21 @@ class WorkflowDefinition(BaseModel):
 
     # Workflow configuration
     definition = Column(
-        JSON,
+        JSONB,
         nullable=False,
-        doc="JSON structure defining the workflow states, transitions, and logic"
+        doc="JSONB structure defining the workflow states, transitions, and logic"
     )
 
     input_schema = Column(
-        JSON,
+        JSONB,
         nullable=True,
-        doc="JSON schema defining expected input parameters for workflow instances"
+        doc="JSONB schema defining expected input parameters for workflow instances"
     )
 
     output_schema = Column(
-        JSON,
+        JSONB,
         nullable=True,
-        doc="JSON schema defining expected output structure from workflow execution"
+        doc="JSONB schema defining expected output structure from workflow execution"
     )
 
     # Execution settings
@@ -111,14 +110,14 @@ class WorkflowDefinition(BaseModel):
 
     # Metadata and tags
     tags = Column(
-        JSON,
+        JSONB,
         nullable=True,
         default=list,
         doc="List of tags for categorizing and searching workflows"
     )
 
-    metadata = Column(
-        JSON,
+    meta_data = Column(
+        JSONB,
         nullable=True,
         default=dict,
         doc="Additional metadata for the workflow definition"

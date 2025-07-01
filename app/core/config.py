@@ -6,7 +6,15 @@ Updated configuration with user management service integration settings.
 
 import secrets
 from typing import Any, Dict, List, Optional, Union
-from pydantic import AnyHttpUrl, BaseSettings, PostgresDsn, RedisDsn, field_validator, model_validator
+from pydantic_settings import BaseSettings
+from pydantic import (
+    AnyHttpUrl,
+    PostgresDsn,
+    RedisDsn,
+    field_validator,
+    model_validator
+)
+
 from pydantic_core.core_schema import FieldValidationInfo
 
 class Settings(BaseSettings):

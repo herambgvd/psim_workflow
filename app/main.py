@@ -8,21 +8,21 @@ authentication middleware, and enhanced security features.
 import time
 from contextlib import asynccontextmanager
 from typing import Dict, Any
-from fastapi import FastAPI, Request, Response, HTTPException
+
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-import structlog
 
+from app.api.v1.api import api_router
+from app.core.auth import get_user_service, AuthenticationError, AuthorizationError
 from app.core.config import settings
 from app.core.database import create_tables, check_database_health, db_manager
 from app.core.logging import get_logger, set_request_id, clear_request_context
-from app.core.auth import get_user_service, AuthenticationError, AuthorizationError
-from app.api.v1.api import api_router
 
 # Configure logger
 logger = get_logger(__name__)
@@ -528,7 +528,7 @@ async def root() -> Dict[str, Any]:
         Dict[str, Any]: API information and status
     """
     return {
-        "message": "Enterprise State Machine Workflow Engine",
+        "message": "GVD Workflow Engine",
         "version": settings.VERSION,
         "environment": settings.ENVIRONMENT,
         "docs_url": "/docs" if settings.DEBUG else None,

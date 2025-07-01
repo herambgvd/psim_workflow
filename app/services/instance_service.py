@@ -1,5 +1,5 @@
 """
-Enterprise State Machine Workflow Engine - Instance Service
+Enterprise State Machine Workflow Engine - Complete Instance Service
 
 Business logic layer for workflow instance management including
 execution control, monitoring, and lifecycle management.
@@ -27,12 +27,21 @@ from app.models.workflow import WorkflowDefinition, WorkflowStatus
 from app.schemas.common import PaginatedResponse
 from app.schemas.instance import (
     InstanceCreateRequest,
+    InstanceUpdateRequest,
     InstanceResponse,
     InstanceSummaryResponse,
     InstanceListParams,
     InstanceEventRequest,
     ExecutionHistoryResponse,
-    InstanceStatsResponse
+    InstanceStatsResponse,
+    InstanceVariableRequest,
+    InstanceVariableResponse,
+    BulkInstanceRequest,
+    BulkInstanceResponse,
+    InstanceMetricsResponse,
+    InstanceRetryRequest,
+    InstanceStatusEnum,
+    PriorityEnum
 )
 from app.state_machine.engine import StateMachineEngine, ExecutionEvent
 
@@ -67,7 +76,7 @@ class InstanceService:
         self.logger = get_logger(f"{__name__}.{self.__class__.__name__}")
         self.state_machine_engine = StateMachineEngine()
 
-    async def create_instance(
+    def create_instance(
             self,
             db: Session,
             instance_data: InstanceCreateRequest,
@@ -179,7 +188,7 @@ class InstanceService:
                 workflow_id=workflow.id
             )
 
-            return await self._to_instance_response(db, instance)
+            return self._to_instance_response(db, instance)
 
         except InstanceServiceError:
             raise
@@ -192,10 +201,11 @@ class InstanceService:
             self.logger.error("Unexpected error during instance creation", error=str(e), exc_info=True)
             raise InstanceServiceError(f"Failed to create instance: {str(e)}")
 
-    async def get_instance_by_id(
+    def get_instance_by_id(
             self,
             db: Session,
             instance_id: UUID,
+            user_id: Optional[str] = None,
             include_deleted: bool = False
     ) -> InstanceResponse:
         """
@@ -204,6 +214,7 @@ class InstanceService:
         Args:
             db: Database session
             instance_id: Instance ID
+            user_id: ID of the requesting user (for access control)
             include_deleted: Whether to include soft-deleted instances
 
         Returns:
@@ -222,12 +233,13 @@ class InstanceService:
         if not instance:
             raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
 
-        return await self._to_instance_response(db, instance)
+        return self._to_instance_response(db, instance)
 
-    async def get_instances(
+    def get_instances(
             self,
             db: Session,
-            params: InstanceListParams
+            params: InstanceListParams,
+            user_id: Optional[str] = None
     ) -> PaginatedResponse:
         """
         Get paginated list of instances.
@@ -235,6 +247,7 @@ class InstanceService:
         Args:
             db: Database session
             params: List parameters
+            user_id: ID of the requesting user (for access control)
 
         Returns:
             PaginatedResponse: Paginated instance list
@@ -301,7 +314,7 @@ class InstanceService:
         instances = query.offset(offset).limit(params.page_size).all()
 
         # Convert to response format
-        items = [await self._to_instance_summary_response(db, i) for i in instances]
+        items = [self._to_instance_summary_response(db, i) for i in instances]
 
         total_pages = (total + params.page_size - 1) // params.page_size
 
@@ -315,7 +328,138 @@ class InstanceService:
             has_prev=params.page > 1
         )
 
-    async def start_instance(
+    def update_instance(
+            self,
+            db: Session,
+            instance_id: UUID,
+            instance_data: InstanceUpdateRequest,
+            updated_by: Optional[UUID] = None,
+            user_id: Optional[str] = None
+    ) -> InstanceResponse:
+        """
+        Update an existing workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            instance_data: Update data
+            updated_by: ID of the user updating the instance
+            user_id: ID of the requesting user (for access control)
+
+        Returns:
+            InstanceResponse: Updated instance
+
+        Raises:
+            InstanceNotFoundError: If instance is not found
+            InstanceServiceError: If update fails
+        """
+        self.logger.info("Updating instance", instance_id=instance_id)
+
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                and_(
+                    WorkflowInstance.id == instance_id,
+                    WorkflowInstance.is_deleted == False
+                )
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            # Update fields
+            update_data = instance_data.model_dump(exclude_unset=True)
+
+            for field, value in update_data.items():
+                if field == "priority" and value:
+                    setattr(instance, field, Priority(value.value))
+                elif hasattr(instance, field):
+                    setattr(instance, field, value)
+
+            instance.updated_by = updated_by
+            instance.updated_at = datetime.utcnow()
+
+            # Create history entry
+            self._create_history_entry(
+                db,
+                instance.id,
+                HistoryEventType.INSTANCE_CREATED,  # Use appropriate event type
+                "Instance updated",
+                {"updated_fields": list(update_data.keys())},
+                updated_by
+            )
+
+            db.commit()
+            db.refresh(instance)
+
+            self.logger.info("Instance updated successfully", instance_id=instance_id)
+
+            return self._to_instance_response(db, instance)
+
+        except InstanceNotFoundError:
+            raise
+        except Exception as e:
+            db.rollback()
+            self.logger.error("Error updating instance", instance_id=instance_id, error=str(e))
+            raise InstanceServiceError(f"Failed to update instance: {str(e)}")
+
+    def delete_instance(
+            self,
+            db: Session,
+            instance_id: UUID,
+            hard_delete: bool = False,
+            deleted_by: Optional[UUID] = None,
+            user_id: Optional[str] = None
+    ) -> bool:
+        """
+        Delete a workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            hard_delete: Whether to perform hard delete
+            deleted_by: ID of the user deleting the instance
+            user_id: ID of the requesting user (for access control)
+
+        Returns:
+            bool: True if deleted successfully
+
+        Raises:
+            InstanceNotFoundError: If instance is not found
+            InstanceStateError: If instance cannot be deleted
+        """
+        self.logger.info("Deleting instance", instance_id=instance_id, hard_delete=hard_delete)
+
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                WorkflowInstance.id == instance_id
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            # Check if instance is in a state that allows deletion
+            if instance.status == InstanceStatus.RUNNING:
+                raise InstanceStateError("Cannot delete running instance. Stop it first.")
+
+            if hard_delete:
+                db.delete(instance)
+            else:
+                instance.soft_delete()
+                instance.updated_by = deleted_by
+
+            db.commit()
+
+            self.logger.info("Instance deleted successfully", instance_id=instance_id)
+            return True
+
+        except (InstanceNotFoundError, InstanceStateError):
+            raise
+        except Exception as e:
+            db.rollback()
+            self.logger.error("Error deleting instance", instance_id=instance_id, error=str(e))
+            raise InstanceServiceError(f"Failed to delete instance: {str(e)}")
+
+    def start_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -336,7 +480,7 @@ class InstanceService:
             InstanceNotFoundError: If instance is not found
             InstanceStateError: If instance cannot be started
         """
-        self.logger.info("Starting workflow instance", instance_id=instance_id)
+        self.logger.info("Starting instance", instance_id=instance_id)
 
         try:
             instance = db.query(WorkflowInstance).filter(
@@ -366,7 +510,7 @@ class InstanceService:
             instance.start_execution(instance.input_data)
 
             # Start state machine execution
-            execution_context = await self.state_machine_engine.start_workflow_instance(
+            execution_context = self.state_machine_engine.start_workflow_instance(
                 workflow,
                 str(instance.id),
                 instance.input_data
@@ -385,7 +529,7 @@ class InstanceService:
                 db_execution_context.variables = execution_context.variables
 
             # Create history entry
-            await self._create_history_entry(
+            self._create_history_entry(
                 db,
                 instance.id,
                 HistoryEventType.INSTANCE_STARTED,
@@ -397,9 +541,9 @@ class InstanceService:
             db.commit()
             db.refresh(instance)
 
-            self.logger.info("Workflow instance started successfully", instance_id=instance_id)
+            self.logger.info("Instance started successfully", instance_id=instance_id)
 
-            return await self._to_instance_response(db, instance)
+            return self._to_instance_response(db, instance)
 
         except (InstanceNotFoundError, InstanceStateError):
             raise
@@ -408,7 +552,7 @@ class InstanceService:
             self.logger.error("Error starting instance", instance_id=instance_id, error=str(e))
             raise InstanceServiceError(f"Failed to start instance: {str(e)}")
 
-    async def pause_instance(
+    def pause_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -425,11 +569,11 @@ class InstanceService:
         Returns:
             InstanceResponse: Paused instance
         """
-        return await self._control_instance(
+        return self._control_instance(
             db, instance_id, "pause", paused_by, InstanceStatus.PAUSED
         )
 
-    async def resume_instance(
+    def resume_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -446,11 +590,11 @@ class InstanceService:
         Returns:
             InstanceResponse: Resumed instance
         """
-        return await self._control_instance(
+        return self._control_instance(
             db, instance_id, "resume", resumed_by, InstanceStatus.RUNNING
         )
 
-    async def cancel_instance(
+    def cancel_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -469,11 +613,34 @@ class InstanceService:
         Returns:
             InstanceResponse: Cancelled instance
         """
-        return await self._control_instance(
+        return self._control_instance(
             db, instance_id, "cancel", cancelled_by, InstanceStatus.CANCELLED, reason
         )
 
-    async def send_event_to_instance(
+    def terminate_instance(
+            self,
+            db: Session,
+            instance_id: UUID,
+            terminated_by: Optional[UUID] = None,
+            reason: Optional[str] = None
+    ) -> InstanceResponse:
+        """
+        Forcefully terminate a workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            terminated_by: ID of the user terminating the instance
+            reason: Termination reason
+
+        Returns:
+            InstanceResponse: Terminated instance
+        """
+        return self._control_instance(
+            db, instance_id, "terminate", terminated_by, InstanceStatus.TERMINATED, reason
+        )
+
+    def send_event_to_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -529,7 +696,7 @@ class InstanceService:
             )
 
             # Process event through state machine
-            transition_results = await self.state_machine_engine.process_event(
+            transition_results = self.state_machine_engine.process_event(
                 str(instance.id),
                 execution_event,
                 workflow
@@ -539,7 +706,7 @@ class InstanceService:
             instance.last_activity_at = datetime.utcnow()
 
             # Create history entry
-            await self._create_history_entry(
+            self._create_history_entry(
                 db,
                 instance.id,
                 HistoryEventType.EVENT_RECEIVED,
@@ -591,12 +758,14 @@ class InstanceService:
             )
             raise InstanceServiceError(f"Failed to send event: {str(e)}")
 
-    async def get_instance_history(
+    def get_instance_history(
             self,
             db: Session,
             instance_id: UUID,
             limit: int = 100,
-            offset: int = 0
+            offset: int = 0,
+            event_type: Optional[str] = None,
+            user_id: Optional[str] = None
     ) -> List[ExecutionHistoryResponse]:
         """
         Get execution history for an instance.
@@ -606,24 +775,36 @@ class InstanceService:
             instance_id: Instance ID
             limit: Maximum number of entries
             offset: Offset for pagination
+            event_type: Filter by event type
+            user_id: ID of the requesting user (for access control)
 
         Returns:
             List[ExecutionHistoryResponse]: History entries
         """
-        history_entries = db.query(ExecutionHistory).filter(
+        query = db.query(ExecutionHistory).filter(
             ExecutionHistory.workflow_instance_id == instance_id
-        ).order_by(
+        )
+
+        if event_type:
+            query = query.filter(ExecutionHistory.event_type == event_type)
+
+        history_entries = query.order_by(
             ExecutionHistory.sequence_number.desc()
         ).offset(offset).limit(limit).all()
 
         return [self._to_history_response(entry) for entry in history_entries]
 
-    async def get_instance_stats(self, db: Session) -> InstanceStatsResponse:
+    def get_instance_stats(
+            self,
+            db: Session,
+            user_id: Optional[str] = None
+    ) -> InstanceStatsResponse:
         """
         Get instance statistics.
 
         Args:
             db: Database session
+            user_id: ID of the requesting user (for access control)
 
         Returns:
             InstanceStatsResponse: Instance statistics
@@ -693,7 +874,7 @@ class InstanceService:
             self.logger.error("Error getting instance stats", error=str(e))
             raise InstanceServiceError(f"Failed to get instance statistics: {str(e)}")
 
-    async def set_instance_variables(
+    def set_instance_variables(
             self,
             db: Session,
             instance_id: UUID,
@@ -743,7 +924,7 @@ class InstanceService:
 
             # Create history entries for variable changes
             for key, value in variables.items():
-                await self._create_history_entry(
+                self._create_history_entry(
                     db,
                     instance.id,
                     HistoryEventType.VARIABLE_SET,
@@ -767,7 +948,446 @@ class InstanceService:
             )
             raise InstanceServiceError(f"Failed to set variables: {str(e)}")
 
-    async def _control_instance(
+    def delete_instance_variable(
+            self,
+            db: Session,
+            instance_id: UUID,
+            variable_name: str,
+            deleted_by: Optional[UUID] = None
+    ) -> None:
+        """
+        Delete a specific variable from a workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            variable_name: Name of the variable to delete
+            deleted_by: ID of the user deleting the variable
+
+        Raises:
+            InstanceNotFoundError: If instance is not found
+            InstanceServiceError: If deletion fails
+        """
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                and_(
+                    WorkflowInstance.id == instance_id,
+                    WorkflowInstance.is_deleted == False
+                )
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            # Remove variable from context data
+            if instance.context_data and variable_name in instance.context_data:
+                del instance.context_data[variable_name]
+                instance.last_activity_at = datetime.utcnow()
+
+            # Remove variable from execution context
+            execution_context = db.query(ExecutionContext).filter(
+                ExecutionContext.workflow_instance_id == instance_id
+            ).first()
+
+            if execution_context and execution_context.variables and variable_name in execution_context.variables:
+                del execution_context.variables[variable_name]
+                execution_context.last_activity_at = datetime.utcnow()
+
+            # Create history entry
+            self._create_history_entry(
+                db,
+                instance.id,
+                HistoryEventType.VARIABLE_SET,
+                f"Variable '{variable_name}' deleted",
+                {"variable": variable_name, "action": "deleted"},
+                deleted_by
+            )
+
+            db.commit()
+
+        except InstanceNotFoundError:
+            raise
+        except Exception as e:
+            db.rollback()
+            self.logger.error(
+                "Error deleting instance variable",
+                instance_id=instance_id,
+                variable_name=variable_name,
+                error=str(e)
+            )
+            raise InstanceServiceError(f"Failed to delete variable: {str(e)}")
+
+    def get_instance_metrics(
+            self,
+            db: Session,
+            instance_id: UUID,
+            user_id: Optional[str] = None
+    ) -> InstanceMetricsResponse:
+        """
+        Get detailed execution metrics for a workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            user_id: ID of the requesting user (for access control)
+
+        Returns:
+            InstanceMetricsResponse: Instance metrics
+        """
+        try:
+            instance = self.get_instance_by_id(db, instance_id, user_id)
+
+            # Get execution history for metrics calculation
+            history_entries = self.get_instance_history(db, instance_id, limit=1000)
+
+            # Calculate state durations
+            state_durations = {}
+            current_state = None
+            state_start_time = None
+
+            for entry in reversed(history_entries):
+                if entry.event_type == "state_entered":
+                    if current_state and state_start_time:
+                        duration = (entry.event_timestamp - state_start_time).total_seconds()
+                        state_durations[current_state] = state_durations.get(current_state, 0) + duration
+
+                    current_state = entry.to_state
+                    state_start_time = entry.event_timestamp
+
+            # Count different types of events
+            error_count = len([e for e in history_entries if e.event_type in ["error_occurred", "task_failed"]])
+            retry_count = len([e for e in history_entries if e.event_type == "retry_attempted"])
+            checkpoint_count = len([e for e in history_entries if e.event_type == "checkpoint_created"])
+
+            return InstanceMetricsResponse(
+                instance_id=instance_id,
+                execution_time=instance.execution_time,
+                state_durations=state_durations,
+                transition_count=len([e for e in history_entries if e.event_type == "transition_executed"]),
+                task_count=len([e for e in history_entries if e.event_type in ["task_started", "task_completed"]]),
+                retry_count=retry_count,
+                error_count=error_count,
+                checkpoint_count=checkpoint_count,
+                memory_usage=None,  # TODO: Implement memory usage tracking
+                performance_metrics={}  # TODO: Implement performance metrics
+            )
+
+        except Exception as e:
+            self.logger.error(
+                "Error retrieving instance metrics",
+                instance_id=instance_id,
+                error=str(e)
+            )
+            raise InstanceServiceError(f"Failed to retrieve instance metrics: {str(e)}")
+
+    def retry_instance(
+            self,
+            db: Session,
+            instance_id: UUID,
+            retry_data: InstanceRetryRequest,
+            retried_by: Optional[UUID] = None
+    ) -> InstanceResponse:
+        """
+        Retry a failed workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            retry_data: Retry configuration
+            retried_by: ID of the user retrying the instance
+
+        Returns:
+            InstanceResponse: Retried instance
+        """
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                and_(
+                    WorkflowInstance.id == instance_id,
+                    WorkflowInstance.is_deleted == False
+                )
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            if instance.status not in (InstanceStatus.FAILED, InstanceStatus.CANCELLED):
+                raise InstanceStateError(
+                    f"Cannot retry instance in status: {instance.status.value}"
+                )
+
+            if not instance.can_retry:
+                raise InstanceStateError("Instance has exceeded maximum retry attempts")
+
+            # Reset instance state if requested
+            if retry_data.reset_state:
+                instance.status = InstanceStatus.CREATED
+                if retry_data.clear_errors:
+                    instance.error_message = None
+                    instance.error_details = None
+
+                # Reset execution context
+                execution_context = db.query(ExecutionContext).filter(
+                    ExecutionContext.workflow_instance_id == instance_id
+                ).first()
+
+                if execution_context:
+                    execution_context.status = ExecutionStatus.PENDING
+                    execution_context.current_state = ""
+                    if retry_data.clear_errors:
+                        execution_context.error_message = None
+                        execution_context.error_details = None
+
+            # Update input data if provided
+            if retry_data.new_input_data:
+                instance.input_data = retry_data.new_input_data
+
+            # Increment retry count
+            instance.increment_retry_count()
+
+            # Create history entry
+            self._create_history_entry(
+                db,
+                instance.id,
+                HistoryEventType.RETRY_ATTEMPTED,
+                f"Instance retry attempted: {retry_data.reason or 'No reason provided'}",
+                {
+                    "retry_count": instance.retry_count,
+                    "reset_state": retry_data.reset_state,
+                    "clear_errors": retry_data.clear_errors,
+                    "reason": retry_data.reason
+                },
+                retried_by
+            )
+
+            db.commit()
+            db.refresh(instance)
+
+            self.logger.info(
+                "Instance retry completed",
+                instance_id=instance_id,
+                retry_count=instance.retry_count
+            )
+
+            return self._to_instance_response(db, instance)
+
+        except (InstanceNotFoundError, InstanceStateError):
+            raise
+        except Exception as e:
+            db.rollback()
+            self.logger.error(
+                "Error retrying instance",
+                instance_id=instance_id,
+                error=str(e)
+            )
+            raise InstanceServiceError(f"Failed to retry instance: {str(e)}")
+
+    def bulk_instance_operations(
+            self,
+            db: Session,
+            bulk_request: BulkInstanceRequest,
+            performed_by: Optional[UUID] = None,
+            user_id: Optional[str] = None
+    ) -> BulkInstanceResponse:
+        """
+        Perform bulk operations on multiple workflow instances.
+
+        Args:
+            db: Database session
+            bulk_request: Bulk operation request
+            performed_by: ID of the user performing the operation
+            user_id: ID of the requesting user (for access control)
+
+        Returns:
+            BulkInstanceResponse: Results of bulk operation
+        """
+        results = []
+        errors = []
+        success_count = 0
+        error_count = 0
+
+        for instance_id in bulk_request.instance_ids:
+            try:
+                if bulk_request.action == "cancel":
+                    result = self.cancel_instance(
+                        db, instance_id, performed_by,
+                        bulk_request.parameters.get("reason")
+                    )
+                elif bulk_request.action == "pause":
+                    result = self.pause_instance(db, instance_id, performed_by)
+                elif bulk_request.action == "resume":
+                    result = self.resume_instance(db, instance_id, performed_by)
+                elif bulk_request.action == "delete":
+                    self.delete_instance(
+                        db, instance_id,
+                        bulk_request.parameters.get("hard_delete", False),
+                        performed_by, user_id
+                    )
+                    result = {"instance_id": str(instance_id), "status": "deleted"}
+                else:
+                    raise InstanceServiceError(f"Unknown bulk action: {bulk_request.action}")
+
+                results.append({
+                    "instance_id": str(instance_id),
+                    "status": "success",
+                    "result": result
+                })
+                success_count += 1
+
+            except Exception as e:
+                error_message = f"Failed to {bulk_request.action} instance {instance_id}: {str(e)}"
+                errors.append(error_message)
+                results.append({
+                    "instance_id": str(instance_id),
+                    "status": "error",
+                    "error": str(e)
+                })
+                error_count += 1
+
+        return BulkInstanceResponse(
+            total_count=len(bulk_request.instance_ids),
+            success_count=success_count,
+            error_count=error_count,
+            results=results,
+            errors=errors
+        )
+
+    def create_checkpoint(
+            self,
+            db: Session,
+            instance_id: UUID,
+            checkpoint_name: str,
+            created_by: Optional[UUID] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a checkpoint for workflow instance recovery.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            checkpoint_name: Name for the checkpoint
+            created_by: ID of the user creating the checkpoint
+
+        Returns:
+            Dict[str, Any]: Checkpoint information
+        """
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                and_(
+                    WorkflowInstance.id == instance_id,
+                    WorkflowInstance.is_deleted == False
+                )
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            # Get execution context
+            execution_context = db.query(ExecutionContext).filter(
+                ExecutionContext.workflow_instance_id == instance_id
+            ).first()
+
+            checkpoint_data = {
+                "instance_id": str(instance_id),
+                "checkpoint_name": checkpoint_name,
+                "created_at": datetime.utcnow().isoformat(),
+                "instance_status": instance.status.value,
+                "current_state": execution_context.current_state if execution_context else None,
+                "variables": execution_context.variables if execution_context else {},
+                "context_data": instance.context_data
+            }
+
+            # Update execution context with checkpoint
+            if execution_context:
+                execution_context.create_checkpoint(checkpoint_data)
+
+            # Create history entry
+            self._create_history_entry(
+                db,
+                instance.id,
+                HistoryEventType.CHECKPOINT_CREATED,
+                f"Checkpoint '{checkpoint_name}' created",
+                {"checkpoint_name": checkpoint_name},
+                created_by
+            )
+
+            db.commit()
+
+            return {
+                "id": str(UUID(bytes=checkpoint_name.encode()[:16].ljust(16, b'\0'))),  # Mock ID
+                "created_at": checkpoint_data["created_at"]
+            }
+
+        except InstanceNotFoundError:
+            raise
+        except Exception as e:
+            db.rollback()
+            self.logger.error(
+                "Error creating checkpoint",
+                instance_id=instance_id,
+                checkpoint_name=checkpoint_name,
+                error=str(e)
+            )
+            raise InstanceServiceError(f"Failed to create checkpoint: {str(e)}")
+
+    def get_instance_checkpoints(
+            self,
+            db: Session,
+            instance_id: UUID,
+            user_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all checkpoints for a workflow instance.
+
+        Args:
+            db: Database session
+            instance_id: Instance ID
+            user_id: ID of the requesting user (for access control)
+
+        Returns:
+            List[Dict[str, Any]]: List of checkpoints
+        """
+        try:
+            instance = db.query(WorkflowInstance).filter(
+                and_(
+                    WorkflowInstance.id == instance_id,
+                    WorkflowInstance.is_deleted == False
+                )
+            ).first()
+
+            if not instance:
+                raise InstanceNotFoundError(f"Instance with ID {instance_id} not found")
+
+            # Get checkpoint history entries
+            checkpoint_entries = db.query(ExecutionHistory).filter(
+                and_(
+                    ExecutionHistory.workflow_instance_id == instance_id,
+                    ExecutionHistory.event_type == HistoryEventType.CHECKPOINT_CREATED
+                )
+            ).order_by(ExecutionHistory.created_at.desc()).all()
+
+            checkpoints = []
+            for entry in checkpoint_entries:
+                checkpoints.append({
+                    "id": str(entry.id),
+                    "name": entry.event_data.get("checkpoint_name") if entry.event_data else "Unknown",
+                    "created_at": entry.event_timestamp.isoformat(),
+                    "created_by": entry.actor_id,
+                    "description": entry.description
+                })
+
+            return checkpoints
+
+        except InstanceNotFoundError:
+            raise
+        except Exception as e:
+            self.logger.error(
+                "Error retrieving checkpoints",
+                instance_id=instance_id,
+                error=str(e)
+            )
+            raise InstanceServiceError(f"Failed to retrieve checkpoints: {str(e)}")
+
+    def _control_instance(
             self,
             db: Session,
             instance_id: UUID,
@@ -792,13 +1412,16 @@ class InstanceService:
             valid_transitions = {
                 InstanceStatus.PAUSED: [InstanceStatus.RUNNING],
                 InstanceStatus.RUNNING: [InstanceStatus.PAUSED, InstanceStatus.CANCELLED],
-                InstanceStatus.CANCELLED: [InstanceStatus.RUNNING, InstanceStatus.PAUSED, InstanceStatus.WAITING]
+                InstanceStatus.CANCELLED: [InstanceStatus.RUNNING, InstanceStatus.PAUSED, InstanceStatus.WAITING],
+                InstanceStatus.TERMINATED: []  # Can terminate from any state
             }
 
             if target_status not in valid_transitions.get(instance.status, [target_status]):
-                raise InstanceStateError(
-                    f"Cannot {action} instance in status: {instance.status.value}"
-                )
+                # Allow terminate from any state
+                if target_status != InstanceStatus.TERMINATED:
+                    raise InstanceStateError(
+                        f"Cannot {action} instance in status: {instance.status.value}"
+                    )
 
             # Update instance status
             if action == "pause":
@@ -807,19 +1430,24 @@ class InstanceService:
                 instance.resume_execution()
             elif action == "cancel":
                 instance.cancel_execution()
+            elif action == "terminate":
+                instance.status = InstanceStatus.TERMINATED
+                instance.completed_at = datetime.utcnow()
+                instance.last_activity_at = datetime.utcnow()
 
             # Update state machine
-            if action == "cancel":
+            if action in ("cancel", "terminate"):
                 self.state_machine_engine.stop_workflow_instance(str(instance.id))
 
             # Create history entry
             event_type_map = {
                 "pause": HistoryEventType.INSTANCE_PAUSED,
                 "resume": HistoryEventType.INSTANCE_RESUMED,
-                "cancel": HistoryEventType.INSTANCE_CANCELLED
+                "cancel": HistoryEventType.INSTANCE_CANCELLED,
+                "terminate": HistoryEventType.INSTANCE_TIMEOUT  # Using closest available
             }
 
-            await self._create_history_entry(
+            self._create_history_entry(
                 db,
                 instance.id,
                 event_type_map[action],
@@ -831,7 +1459,7 @@ class InstanceService:
             db.commit()
             db.refresh(instance)
 
-            return await self._to_instance_response(db, instance)
+            return self._to_instance_response(db, instance)
 
         except (InstanceNotFoundError, InstanceStateError):
             raise
@@ -840,7 +1468,7 @@ class InstanceService:
             self.logger.error(f"Error {action}ing instance", instance_id=instance_id, error=str(e))
             raise InstanceServiceError(f"Failed to {action} instance: {str(e)}")
 
-    async def _create_history_entry(
+    def _create_history_entry(
             self,
             db: Session,
             instance_id: UUID,
@@ -867,7 +1495,7 @@ class InstanceService:
 
         db.add(history_entry)
 
-    async def _to_instance_response(self, db: Session, instance: WorkflowInstance) -> InstanceResponse:
+    def _to_instance_response(self, db: Session, instance: WorkflowInstance) -> InstanceResponse:
         """Convert instance model to response schema."""
         # Get execution context
         execution_context = db.query(ExecutionContext).filter(
@@ -924,7 +1552,7 @@ class InstanceService:
             deleted_at=instance.deleted_at
         )
 
-    async def _to_instance_summary_response(
+    def _to_instance_summary_response(
             self,
             db: Session,
             instance: WorkflowInstance

@@ -6,7 +6,7 @@ This module sets up the main API router and includes all endpoint routers.
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import health
+from app.api.v1.endpoints import health, workflows, instances
 
 
 # Create main API router
@@ -20,14 +20,14 @@ api_router.include_router(
 )
 
 # Note: Additional routers will be added as we implement more features
-# api_router.include_router(
-#     workflows.router,
-#     prefix="/workflows",
-#     tags=["Workflows"]
-# )
-# api_router.include_router(
-#     instances.router,
-#     prefix="/instances",
-#     tags=["Workflow Instances"]
-# )
+api_router.include_router(
+    workflows.router,
+    prefix="/workflows",
+    tags=["Workflows"]
+)
+api_router.include_router(
+    instances.router,
+    prefix="/instances",
+    tags=["Workflow Instances"]
+)
 
