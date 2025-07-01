@@ -1,8 +1,8 @@
 """
 Enterprise State Machine Workflow Engine - FastAPI Application
 
-This module contains the main FastAPI application setup with middleware,
-error handlers, and route registration.
+Updated main FastAPI application with user management integration,
+authentication middleware, and enhanced security features.
 """
 
 import time
@@ -21,6 +21,7 @@ import structlog
 from app.core.config import settings
 from app.core.database import create_tables, check_database_health, db_manager
 from app.core.logging import get_logger, set_request_id, clear_request_context
+from app.core.auth import get_user_service, AuthenticationError, AuthorizationError
 from app.api.v1.api import api_router
 
 # Configure logger
@@ -29,10 +30,10 @@ logger = get_logger(__name__)
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """
-    Middleware for logging HTTP requests and responses.
+    Middleware for logging HTTP requests and responses with user context.
 
-    Automatically logs request details, response status, and timing information
-    for all API calls.
+    Automatically logs request details, response status, timing information,
+    and user context for all API calls.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -45,6 +46,23 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else "unknown"
         user_agent = request.headers.get("user-agent", "unknown")
 
+        # Try to extract user info from Authorization header for logging
+        user_info = {"user_id": None, "username": None}
+        if settings.auth_enabled:
+            auth_header = request.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                try:
+                    token = auth_header.split(" ")[1]
+                    user_service = get_user_service()
+                    user_data = await user_service.validate_token(token)
+                    user_info = {
+                        "user_id": str(user_data.get("id")),
+                        "username": user_data.get("username")
+                    }
+                except Exception:
+                    # Don't fail the request if user extraction fails
+                    pass
+
         # Log request start
         logger.info(
             "Request started",
@@ -54,7 +72,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             query_params=dict(request.query_params),
             client_ip=client_ip,
             user_agent=user_agent,
-            request_id=request_id
+            request_id=request_id,
+            user_id=user_info["user_id"],
+            username=user_info["username"]
         )
 
         try:
@@ -69,7 +89,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "Request completed",
                 status_code=response.status_code,
                 duration_ms=round(duration * 1000, 2),
-                request_id=request_id
+                request_id=request_id,
+                user_id=user_info["user_id"],
+                username=user_info["username"]
             )
 
             # Add request ID to response headers
@@ -87,7 +109,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 error=str(e),
                 error_type=type(e).__name__,
                 duration_ms=round(duration * 1000, 2),
-                request_id=request_id
+                request_id=request_id,
+                user_id=user_info["user_id"],
+                username=user_info["username"]
             )
 
             # Re-raise the exception
@@ -119,7 +143,91 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         if request.url.scheme == "https":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
+        # Add authentication-related headers
+        if settings.auth_enabled:
+            response.headers["X-Auth-Required"] = "true"
+            response.headers["X-Auth-Service"] = settings.USER_SERVICE_URL
+        else:
+            response.headers["X-Auth-Required"] = "false"
+
         return response
+
+
+class UserServiceHealthMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware to check user service health for authenticated endpoints.
+
+    Provides circuit breaker functionality for user service calls.
+    """
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.circuit_open = False
+
+    async def dispatch(self, request: Request, call_next):
+        """Check user service health for protected endpoints."""
+        # Skip health check for public endpoints
+        if not settings.auth_enabled or request.url.path in ["/", "/health", "/docs", "/openapi.json"]:
+            return await call_next(request)
+
+        # Check if request has authorization header
+        auth_header = request.headers.get("authorization")
+        if not auth_header:
+            return await call_next(request)
+
+        # Check circuit breaker
+        if self.circuit_open:
+            current_time = time.time()
+            if current_time - self.last_failure_time > settings.CIRCUIT_BREAKER_RECOVERY_TIMEOUT:
+                self.circuit_open = False
+                self.failure_count = 0
+                logger.info("User service circuit breaker reset")
+            else:
+                logger.warning("User service circuit breaker is open")
+                raise HTTPException(
+                    status_code=503,
+                    detail="User service temporarily unavailable"
+                )
+
+        try:
+            # Check user service health
+            user_service = get_user_service()
+            is_healthy = await user_service.health_check()
+
+            if not is_healthy:
+                self.failure_count += 1
+                self.last_failure_time = time.time()
+
+                if self.failure_count >= settings.CIRCUIT_BREAKER_FAILURE_THRESHOLD:
+                    self.circuit_open = True
+                    logger.error("User service circuit breaker opened")
+
+                if settings.RBAC_STRICT_MODE:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="User service unavailable"
+                    )
+            else:
+                # Reset failure count on successful health check
+                self.failure_count = 0
+
+            return await call_next(request)
+
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise
+
+            logger.error("User service health check failed", error=str(e))
+
+            if settings.RBAC_STRICT_MODE:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Authentication service error"
+                )
+
+            return await call_next(request)
 
 
 @asynccontextmanager
@@ -127,10 +235,11 @@ async def lifespan(app: FastAPI):
     """
     Application lifespan context manager.
 
-    Handles startup and shutdown events for the FastAPI application.
+    Handles startup and shutdown events for the FastAPI application
+    including user service integration.
     """
     # Startup
-    logger.info("Starting Enterprise Workflow Engine")
+    logger.info("Starting Enterprise Workflow Engine with User Management Integration")
 
     try:
         # Create database tables
@@ -142,7 +251,30 @@ async def lifespan(app: FastAPI):
             logger.error("Database health check failed")
             raise RuntimeError("Database is not healthy")
 
-        logger.info("Application startup completed successfully")
+        # Check user service connectivity if authentication is enabled
+        if settings.auth_enabled:
+            try:
+                user_service = get_user_service()
+                user_service_healthy = await user_service.health_check()
+
+                if user_service_healthy:
+                    logger.info("User service connection verified")
+                else:
+                    logger.warning("User service is not responding")
+                    if settings.RBAC_STRICT_MODE:
+                        raise RuntimeError("User service is required but not available")
+
+            except Exception as e:
+                logger.error("Failed to connect to user service", error=str(e))
+                if settings.RBAC_STRICT_MODE:
+                    raise RuntimeError(f"User service connection failed: {str(e)}")
+
+        logger.info(
+            "Application startup completed successfully",
+            auth_enabled=settings.auth_enabled,
+            rbac_enabled=settings.rbac_enabled,
+            user_service_url=settings.USER_SERVICE_URL if settings.auth_enabled else None
+        )
 
         yield
 
@@ -154,6 +286,15 @@ async def lifespan(app: FastAPI):
         # Shutdown
         logger.info("Shutting down Enterprise Workflow Engine")
 
+        # Close user service connections
+        if settings.auth_enabled:
+            try:
+                user_service = get_user_service()
+                await user_service.close()
+                logger.info("User service connections closed")
+            except Exception as e:
+                logger.error("Error closing user service connections", error=str(e))
+
         # Close database connections
         db_manager.close()
         logger.info("Database connections closed")
@@ -163,7 +304,7 @@ async def lifespan(app: FastAPI):
 
 def create_application() -> FastAPI:
     """
-    Create and configure the FastAPI application.
+    Create and configure the FastAPI application with user management integration.
 
     Returns:
         FastAPI: Configured FastAPI application instance
@@ -196,6 +337,10 @@ def create_application() -> FastAPI:
     # Add security middleware
     app.add_middleware(SecurityHeadersMiddleware)
 
+    # Add user service health middleware if authentication is enabled
+    if settings.auth_enabled and settings.CIRCUIT_BREAKER_ENABLED:
+        app.add_middleware(UserServiceHealthMiddleware)
+
     # Add request logging middleware
     app.add_middleware(RequestLoggingMiddleware)
 
@@ -222,6 +367,50 @@ def add_exception_handlers(app: FastAPI) -> None:
     Args:
         app: FastAPI application instance
     """
+
+    @app.exception_handler(AuthenticationError)
+    async def authentication_exception_handler(request: Request, exc: AuthenticationError) -> JSONResponse:
+        """Handle authentication errors."""
+        logger.warning(
+            "Authentication error occurred",
+            error=str(exc),
+            path=request.url.path,
+            client_ip=request.client.host if request.client else None
+        )
+
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error": {
+                    "type": "authentication_error",
+                    "code": 401,
+                    "message": str(exc),
+                    "timestamp": time.time()
+                }
+            }
+        )
+
+    @app.exception_handler(AuthorizationError)
+    async def authorization_exception_handler(request: Request, exc: AuthorizationError) -> JSONResponse:
+        """Handle authorization errors."""
+        logger.warning(
+            "Authorization error occurred",
+            error=str(exc),
+            path=request.url.path,
+            client_ip=request.client.host if request.client else None
+        )
+
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "type": "authorization_error",
+                    "code": 403,
+                    "message": str(exc),
+                    "timestamp": time.time()
+                }
+            }
+        )
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
@@ -344,11 +533,19 @@ async def root() -> Dict[str, Any]:
         "environment": settings.ENVIRONMENT,
         "docs_url": "/docs" if settings.DEBUG else None,
         "api_prefix": settings.API_V1_STR,
+        "authentication": {
+            "enabled": settings.auth_enabled,
+            "user_service_url": settings.USER_SERVICE_URL if settings.auth_enabled else None
+        },
+        "authorization": {
+            "enabled": settings.rbac_enabled,
+            "strict_mode": settings.RBAC_STRICT_MODE
+        },
         "timestamp": time.time()
     }
 
 
-# Health check endpoint
+# Health check endpoint (public)
 @app.get("/health", tags=["Health"])
 async def health_check() -> Dict[str, Any]:
     """
@@ -362,11 +559,29 @@ async def health_check() -> Dict[str, Any]:
     # Check database health
     db_healthy = check_database_health()
 
+    # Check user service health if authentication is enabled
+    user_service_healthy = True
+    if settings.auth_enabled:
+        try:
+            user_service = get_user_service()
+            user_service_healthy = await user_service.health_check()
+        except Exception as e:
+            logger.error("User service health check failed", error=str(e))
+            user_service_healthy = False
+
     # Calculate response time
     response_time = round((time.time() - start_time) * 1000, 2)
 
-    status = "healthy" if db_healthy else "unhealthy"
-    status_code = 200 if db_healthy else 503
+    # Determine overall status
+    if not db_healthy:
+        status = "unhealthy"
+        status_code = 503
+    elif settings.auth_enabled and not user_service_healthy and settings.rbac_enabled:
+        status = "degraded"
+        status_code = 200  # Still functional but degraded
+    else:
+        status = "healthy"
+        status_code = 200
 
     health_data = {
         "status": status,
@@ -375,11 +590,22 @@ async def health_check() -> Dict[str, Any]:
         "timestamp": time.time(),
         "response_time_ms": response_time,
         "checks": {
-            "database": "healthy" if db_healthy else "unhealthy"
+            "database": "healthy" if db_healthy else "unhealthy",
+            "user_service": "healthy" if user_service_healthy else "unhealthy" if settings.auth_enabled else "disabled"
+        },
+        "authentication": {
+            "enabled": settings.auth_enabled,
+            "user_service_healthy": user_service_healthy if settings.auth_enabled else None
         }
     }
 
-    logger.info("Health check performed", health_status=status, response_time_ms=response_time)
+    logger.info(
+        "Health check performed",
+        health_status=status,
+        response_time_ms=response_time,
+        db_healthy=db_healthy,
+        user_service_healthy=user_service_healthy
+    )
 
     return JSONResponse(
         status_code=status_code,
@@ -405,9 +631,28 @@ async def readiness_check() -> Dict[str, Any]:
             detail="Application is not ready - database unavailable"
         )
 
+    # Check user service if authentication is required
+    if settings.auth_enabled and settings.rbac_enabled:
+        try:
+            user_service = get_user_service()
+            user_service_healthy = await user_service.health_check()
+
+            if not user_service_healthy:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Application is not ready - user service unavailable"
+                )
+        except Exception as e:
+            logger.error("User service readiness check failed", error=str(e))
+            raise HTTPException(
+                status_code=503,
+                detail="Application is not ready - user service error"
+            )
+
     return {
         "status": "ready",
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "authentication_ready": not settings.auth_enabled or True  # Would check user service
     }
 
 

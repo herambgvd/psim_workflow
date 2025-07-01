@@ -1,8 +1,7 @@
 """
 Enterprise State Machine Workflow Engine - Core Configuration
 
-This module handles all application configuration using Pydantic Settings
-for type validation and environment variable management.
+Updated configuration with user management service integration settings.
 """
 
 import secrets
@@ -15,7 +14,8 @@ class Settings(BaseSettings):
     Application settings loaded from environment variables.
 
     This class handles all configuration for the workflow engine,
-    including database connections, security settings, and external services.
+    including database connections, security settings, user management integration,
+    and external services.
     """
     # ===== APPLICATION SETTINGS =====
     API_V1_STR: str = "/api/v1"
@@ -54,12 +54,69 @@ class Settings(BaseSettings):
             return v
         raise ValueError(v)
 
+    # ===== USER MANAGEMENT SERVICE INTEGRATION =====
+    # User Service Configuration
+    USER_SERVICE_URL: str = "http://localhost:8001"
+    USER_SERVICE_TIMEOUT: int = 30
+    USER_SERVICE_RETRY_ATTEMPTS: int = 3
+    USER_SERVICE_RETRY_DELAY: float = 1.0
+
+    # Authentication Configuration
+    AUTH_ENABLED: bool = True
+    AUTH_TOKEN_HEADER: str = "Authorization"
+    AUTH_TOKEN_PREFIX: str = "Bearer"
+    AUTH_CACHE_TTL: int = 300  # 5 minutes
+
+    # RBAC Configuration
+    RBAC_ENABLED: bool = True
+    RBAC_STRICT_MODE: bool = False  # If True, deny access when permission check fails
+    RBAC_CACHE_TTL: int = 300  # 5 minutes
+
+    # Permission Definitions
+    WORKFLOW_PERMISSIONS: Dict[str, str] = {
+        "create": "workflow:create",
+        "read": "workflow:read",
+        "update": "workflow:update",
+        "delete": "workflow:delete",
+        "activate": "workflow:activate",
+        "deactivate": "workflow:deactivate",
+        "clone": "workflow:clone",
+        "export": "workflow:export",
+        "import": "workflow:import",
+        "validate": "workflow:validate",
+        "view_stats": "workflow:view_stats"
+    }
+
+    INSTANCE_PERMISSIONS: Dict[str, str] = {
+        "create": "instance:create",
+        "read": "instance:read",
+        "update": "instance:update",
+        "delete": "instance:delete",
+        "start": "instance:start",
+        "pause": "instance:pause",
+        "resume": "instance:resume",
+        "cancel": "instance:cancel",
+        "retry": "instance:retry",
+        "send_events": "instance:send_events",
+        "view_history": "instance:view_history",
+        "manage_variables": "instance:manage_variables",
+        "view_metrics": "instance:view_metrics",
+        "bulk_operations": "instance:bulk_operations",
+        "view_stats": "instance:view_stats"
+    }
+
+    SYSTEM_PERMISSIONS: Dict[str, str] = {
+        "admin": "system:admin",
+        "view_health": "system:view_health",
+        "view_metrics": "system:view_metrics",
+        "manage_system": "system:manage"
+    }
 
     # ===== DATABASE SETTINGS =====
     # PostgreSQL Database Configuration
     POSTGRES_SERVER: str = "localhost"
     POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "Hanu%%400542"
+    POSTGRES_PASSWORD: str = "Hanu%400542"
     POSTGRES_DB: str = "psim_automation"
     POSTGRES_PORT: str = "5433"
 
@@ -190,12 +247,24 @@ class Settings(BaseSettings):
     EMAILS_FROM_NAME: Optional[str] = None
 
     # ===== FIRST SUPERUSER =====
-    FIRST_SUPERUSER: str = "admin@workflow-engine.com"
-    FIRST_SUPERUSER_PASSWORD: str = "changethis"
+    FIRST_SUPERUSER: str = "admin@geniusvision.in"
+    FIRST_SUPERUSER_PASSWORD: str = "Gvd@6001"
 
     # ===== TESTING SETTINGS =====
     TESTING: bool = False
     TEST_DATABASE_URL: Optional[str] = None
+
+    # ===== SERVICE DISCOVERY & COMMUNICATION =====
+    SERVICE_DISCOVERY_ENABLED: bool = False
+    SERVICE_REGISTRY_URL: Optional[str] = None
+    CIRCUIT_BREAKER_ENABLED: bool = True
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT: int = 60  # seconds
+
+    # Request timeout and retry settings
+    DEFAULT_HTTP_TIMEOUT: int = 30
+    DEFAULT_HTTP_RETRIES: int = 3
+    DEFAULT_HTTP_BACKOFF_FACTOR: float = 0.3
 
     @property
     def is_development(self) -> bool:
@@ -212,11 +281,41 @@ class Settings(BaseSettings):
         """Check if running in testing mode."""
         return self.TESTING
 
+    @property
+    def auth_enabled(self) -> bool:
+        """Check if authentication is enabled."""
+        return self.AUTH_ENABLED and not self.is_testing
+
+    @property
+    def rbac_enabled(self) -> bool:
+        """Check if RBAC is enabled."""
+        return self.RBAC_ENABLED and self.auth_enabled
+
     def get_database_url(self) -> str:
         """Get the appropriate database URL based on environment."""
         if self.is_testing and self.TEST_DATABASE_URL:
             return self.TEST_DATABASE_URL
         return str(self.SQLALCHEMY_DATABASE_URI)
+
+    def get_permission(self, resource: str, action: str) -> Optional[str]:
+        """
+        Get permission string for resource and action.
+
+        Args:
+            resource: Resource type (workflow, instance, system)
+            action: Action to perform
+
+        Returns:
+            Permission string or None if not found
+        """
+        permission_maps = {
+            "workflow": self.WORKFLOW_PERMISSIONS,
+            "instance": self.INSTANCE_PERMISSIONS,
+            "system": self.SYSTEM_PERMISSIONS
+        }
+
+        resource_permissions = permission_maps.get(resource, {})
+        return resource_permissions.get(action)
 
     class Config:
         """Pydantic configuration."""
@@ -248,3 +347,4 @@ DATABASE_URL = settings.get_database_url()
 REDIS_URL = str(settings.REDIS_URL)
 SECRET_KEY = settings.SECRET_KEY
 API_V1_STR = settings.API_V1_STR
+USER_SERVICE_URL = settings.USER_SERVICE_URL
