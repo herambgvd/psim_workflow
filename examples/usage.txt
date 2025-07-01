@@ -1,0 +1,25 @@
+# Usage Instructions:
+
+# 1. Create a workflow:
+# curl -X POST http://localhost:8000/api/v1/workflows/ \
+#   -H "Content-Type: application/json" \
+#   -d @examples/sample_workflow_simple.json
+
+# 2. Create an instance (replace YOUR_WORKFLOW_ID_HERE with actual ID):
+# curl -X POST http://localhost:8000/api/v1/instances/ \
+#   -H "Content-Type: application/json" \
+#   -d @examples/create_sample_instance.json
+
+# 3. Start the instance:
+# curl -X POST http://localhost:8000/api/v1/instances/{INSTANCE_ID}/start
+
+# 4. Send an approval event:
+# curl -X POST http://localhost:8000/api/v1/instances/{INSTANCE_ID}/events \
+#   -H "Content-Type: application/json" \
+#   -d @examples/send_approval_event.json
+
+# 5. Check instance status:
+# curl -X GET http://localhost:8000/api/v1/instances/{INSTANCE_ID}
+
+# 6. View execution history:
+# curl -X GET http://localhost:8000/api/v1/instances/{INSTANCE_ID}/history

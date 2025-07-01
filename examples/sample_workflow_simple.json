@@ -1,0 +1,284 @@
+{
+  "name": "Simple Approval Workflow",
+  "description": "A basic approval workflow for document processing",
+  "version": "1.0.0",
+  "definition": {
+    "states": {
+      "submitted": {
+        "name": "submitted",
+        "display_name": "Document Submitted",
+        "state_type": "initial",
+        "description": "Document has been submitted for approval",
+        "entry_actions": [
+          {
+            "type": "notification",
+            "config": {
+              "message": "Document submitted for approval",
+              "recipients": [
+                "approver@company.com"
+              ]
+            }
+          }
+        ]
+      },
+      "under_review": {
+        "name": "under_review",
+        "display_name": "Under Review",
+        "state_type": "intermediate",
+        "description": "Document is being reviewed by approver",
+        "tasks": [
+          {
+            "type": "review_task",
+            "config": {
+              "assignee": "approver@company.com",
+              "deadline_hours": 24
+            }
+          }
+        ],
+        "timeout_seconds": 86400
+      },
+      "approved": {
+        "name": "approved",
+        "display_name": "Approved",
+        "state_type": "final",
+        "description": "Document has been approved",
+        "entry_actions": [
+          {
+            "type": "notification",
+            "config": {
+              "message": "Document approved",
+              "recipients": [
+                "submitter@company.com"
+              ]
+            }
+          }
+        ]
+      },
+      "rejected": {
+        "name": "rejected",
+        "display_name": "Rejected",
+        "state_type": "final",
+        "description": "Document has been rejected",
+        "entry_actions": [
+          {
+            "type": "notification",
+            "config": {
+              "message": "Document rejected",
+              "recipients": [
+                "submitter@company.com"
+              ]
+            }
+          }
+        ]
+      },
+      "revision_needed": {
+        "name": "revision_needed",
+        "display_name": "Revision Needed",
+        "state_type": "intermediate",
+        "description": "Document needs revision before approval"
+      }
+    },
+    "transitions": [
+      {
+        "name": "start_review",
+        "description": "Start the review process",
+        "from_state": "submitted",
+        "to_state": "under_review",
+        "transition_type": "automatic",
+        "priority": 1
+      },
+      {
+        "name": "approve_document",
+        "description": "Approve the document",
+        "from_state": "under_review",
+        "to_state": "approved",
+        "transition_type": "event",
+        "trigger_event": "approve_decision",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "decision",
+            "value": "approved"
+          }
+        ],
+        "priority": 2
+      },
+      {
+        "name": "reject_document",
+        "description": "Reject the document",
+        "from_state": "under_review",
+        "to_state": "rejected",
+        "transition_type": "event",
+        "trigger_event": "approve_decision",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "decision",
+            "value": "rejected"
+          }
+        ],
+        "priority": 2
+      },
+      {
+        "name": "request_revision",
+        "description": "Request revision of the document",
+        "from_state": "under_review",
+        "to_state": "revision_needed",
+        "transition_type": "event",
+        "trigger_event": "approve_decision",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "decision",
+            "value": "revision_needed"
+          }
+        ],
+        "priority": 2
+      },
+      {
+        "name": "resubmit_after_revision",
+        "description": "Resubmit document after revision",
+        "from_state": "revision_needed",
+        "to_state": "under_review",
+        "transition_type": "event",
+        "trigger_event": "document_revised",
+        "priority": 1
+      }
+    ],
+    "events": [
+      {
+        "name": "approve_decision",
+        "display_name": "Approval Decision",
+        "description": "Event triggered when approver makes a decision",
+        "event_type": "user_action",
+        "payload_schema": {
+          "type": "object",
+          "properties": {
+            "decision": {
+              "type": "string",
+              "enum": [
+                "approved",
+                "rejected",
+                "revision_needed"
+              ]
+            },
+            "comments": {
+              "type": "string"
+            },
+            "approver_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "decision",
+            "approver_id"
+          ]
+        }
+      },
+      {
+        "name": "document_revised",
+        "display_name": "Document Revised",
+        "description": "Event triggered when document is revised and resubmitted",
+        "event_type": "user_action",
+        "payload_schema": {
+          "type": "object",
+          "properties": {
+            "revised_content": {
+              "type": "string"
+            },
+            "revision_notes": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "revised_content"
+          ]
+        }
+      }
+    ],
+    "initial_state": "submitted",
+    "final_states": [
+      "approved",
+      "rejected"
+    ]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "document_id": {
+        "type": "string",
+        "description": "Unique identifier for the document"
+      },
+      "document_title": {
+        "type": "string",
+        "description": "Title of the document"
+      },
+      "submitter_id": {
+        "type": "string",
+        "description": "ID of the person submitting the document"
+      },
+      "approver_id": {
+        "type": "string",
+        "description": "ID of the designated approver"
+      },
+      "priority": {
+        "type": "string",
+        "enum": [
+          "low",
+          "normal",
+          "high",
+          "urgent"
+        ],
+        "default": "normal"
+      }
+    },
+    "required": [
+      "document_id",
+      "document_title",
+      "submitter_id",
+      "approver_id"
+    ]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "final_status": {
+        "type": "string",
+        "enum": [
+          "approved",
+          "rejected"
+        ]
+      },
+      "approval_date": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "approver_comments": {
+        "type": "string"
+      },
+      "revision_count": {
+        "type": "integer"
+      }
+    }
+  },
+  "timeout_seconds": 172800,
+  "max_retries": 2,
+  "retry_delay_seconds": 300,
+  "tags": [
+    "approval",
+    "document",
+    "review"
+  ],
+  "metadata": {
+    "created_by": "workflow_designer",
+    "department": "operations",
+    "category": "approval_workflows"
+  }
+}
+
+
+
+
+
+
+

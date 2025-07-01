@@ -1,0 +1,294 @@
+{
+  "name": "E-commerce Order Processing",
+  "description": "Complex workflow for processing e-commerce orders with inventory, payment, and fulfillment",
+  "version": "1.2.0",
+  "definition": {
+    "states": {
+      "order_received": {
+        "name": "order_received",
+        "display_name": "Order Received",
+        "state_type": "initial",
+        "description": "Order has been received and queued for processing"
+      },
+      "inventory_check": {
+        "name": "inventory_check",
+        "display_name": "Checking Inventory",
+        "state_type": "intermediate",
+        "description": "Checking item availability and reserving inventory",
+        "tasks": [
+          {
+            "type": "inventory_check",
+            "config": {
+              "timeout": 30,
+              "retry_count": 3
+            }
+          }
+        ],
+        "timeout_seconds": 120
+      },
+      "payment_processing": {
+        "name": "payment_processing",
+        "display_name": "Processing Payment",
+        "state_type": "intermediate",
+        "description": "Processing customer payment",
+        "tasks": [
+          {
+            "type": "payment_charge",
+            "config": {
+              "timeout": 60,
+              "retry_count": 2
+            }
+          }
+        ],
+        "timeout_seconds": 300
+      },
+      "fulfillment": {
+        "name": "fulfillment",
+        "display_name": "Fulfillment",
+        "state_type": "intermediate",
+        "description": "Preparing and shipping the order",
+        "tasks": [
+          {
+            "type": "pick_pack",
+            "config": {
+              "warehouse": "primary"
+            }
+          },
+          {
+            "type": "ship_order",
+            "config": {
+              "carrier": "ups"
+            }
+          }
+        ]
+      },
+      "completed": {
+        "name": "completed",
+        "display_name": "Order Completed",
+        "state_type": "final",
+        "description": "Order has been successfully completed and shipped"
+      },
+      "cancelled": {
+        "name": "cancelled",
+        "display_name": "Order Cancelled",
+        "state_type": "final",
+        "description": "Order has been cancelled"
+      },
+      "payment_failed": {
+        "name": "payment_failed",
+        "display_name": "Payment Failed",
+        "state_type": "error",
+        "description": "Payment processing failed"
+      },
+      "out_of_stock": {
+        "name": "out_of_stock",
+        "display_name": "Out of Stock",
+        "state_type": "error",
+        "description": "Items are out of stock"
+      },
+      "awaiting_stock": {
+        "name": "awaiting_stock",
+        "display_name": "Awaiting Stock",
+        "state_type": "wait",
+        "description": "Waiting for items to be restocked"
+      }
+    },
+    "transitions": [
+      {
+        "name": "start_inventory_check",
+        "from_state": "order_received",
+        "to_state": "inventory_check",
+        "transition_type": "automatic",
+        "delay_seconds": 5
+      },
+      {
+        "name": "inventory_available",
+        "from_state": "inventory_check",
+        "to_state": "payment_processing",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "inventory_available",
+            "value": true
+          }
+        ]
+      },
+      {
+        "name": "inventory_unavailable",
+        "from_state": "inventory_check",
+        "to_state": "out_of_stock",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "inventory_available",
+            "value": false
+          },
+          {
+            "type": "variable_equals",
+            "variable": "backorder_allowed",
+            "value": false
+          }
+        ]
+      },
+      {
+        "name": "backorder_item",
+        "from_state": "inventory_check",
+        "to_state": "awaiting_stock",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "inventory_available",
+            "value": false
+          },
+          {
+            "type": "variable_equals",
+            "variable": "backorder_allowed",
+            "value": true
+          }
+        ]
+      },
+      {
+        "name": "stock_replenished",
+        "from_state": "awaiting_stock",
+        "to_state": "payment_processing",
+        "transition_type": "event",
+        "trigger_event": "stock_updated"
+      },
+      {
+        "name": "payment_successful",
+        "from_state": "payment_processing",
+        "to_state": "fulfillment",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "payment_status",
+            "value": "approved"
+          }
+        ]
+      },
+      {
+        "name": "payment_declined",
+        "from_state": "payment_processing",
+        "to_state": "payment_failed",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "payment_status",
+            "value": "declined"
+          }
+        ]
+      },
+      {
+        "name": "order_fulfilled",
+        "from_state": "fulfillment",
+        "to_state": "completed",
+        "transition_type": "conditional",
+        "conditions": [
+          {
+            "type": "variable_equals",
+            "variable": "fulfillment_status",
+            "value": "shipped"
+          }
+        ]
+      },
+      {
+        "name": "cancel_order",
+        "from_state": "order_received",
+        "to_state": "cancelled",
+        "transition_type": "event",
+        "trigger_event": "order_cancelled"
+      },
+      {
+        "name": "cancel_from_inventory",
+        "from_state": "inventory_check",
+        "to_state": "cancelled",
+        "transition_type": "event",
+        "trigger_event": "order_cancelled"
+      },
+      {
+        "name": "cancel_from_payment",
+        "from_state": "payment_processing",
+        "to_state": "cancelled",
+        "transition_type": "event",
+        "trigger_event": "order_cancelled"
+      }
+    ],
+    "events": [
+      {
+        "name": "order_cancelled",
+        "description": "Order cancellation event",
+        "event_type": "user_action",
+        "payload_schema": {
+          "type": "object",
+          "properties": {
+            "reason": {"type": "string"},
+            "cancelled_by": {"type": "string"}
+          }
+        }
+      },
+      {
+        "name": "stock_updated",
+        "description": "Inventory stock update event",
+        "event_type": "system",
+        "payload_schema": {
+          "type": "object",
+          "properties": {
+            "sku": {"type": "string"},
+            "quantity": {"type": "integer"}
+          }
+        }
+      },
+      {
+        "name": "payment_webhook",
+        "description": "Payment gateway webhook",
+        "event_type": "webhook",
+        "payload_schema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": {"type": "string"},
+            "status": {"type": "string"},
+            "amount": {"type": "number"}
+          }
+        }
+      }
+    ],
+    "initial_state": "order_received",
+    "final_states": ["completed", "cancelled", "payment_failed", "out_of_stock"]
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "order_id": {"type": "string"},
+      "customer_id": {"type": "string"},
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "sku": {"type": "string"},
+            "quantity": {"type": "integer"},
+            "price": {"type": "number"}
+          }
+        }
+      },
+      "shipping_address": {"type": "object"},
+      "payment_method": {"type": "string"},
+      "priority": {"type": "string", "enum": ["standard", "express", "overnight"]}
+    },
+    "required": ["order_id", "customer_id", "items", "shipping_address", "payment_method"]
+  },
+  "timeout_seconds": 3600,
+  "max_retries": 3,
+  "retry_delay_seconds": 180,
+  "tags": ["ecommerce", "order_processing", "fulfillment", "payment"],
+  "metadata": {
+    "business_process": "order_fulfillment",
+    "sla_hours": 24,
+    "department": "operations"
+  }
+}

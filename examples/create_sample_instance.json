@@ -1,0 +1,20 @@
+{
+  "workflow_definition_id": "YOUR_WORKFLOW_ID_HERE",
+  "name": "Sample Document Approval - Quarterly Report",
+  "description": "Approval workflow for Q4 2024 quarterly report",
+  "input_data": {
+    "document_id": "doc-2024-q4-001",
+    "document_title": "Q4 2024 Financial Report",
+    "submitter_id": "user-123",
+    "approver_id": "manager-456",
+    "priority": "high"
+  },
+  "priority": "high",
+  "tags": ["quarterly-report", "finance", "urgent"],
+  "metadata": {
+    "department": "finance",
+    "quarter": "Q4",
+    "year": "2024"
+  },
+  "correlation_id": "finance-q4-2024-approval"
+}

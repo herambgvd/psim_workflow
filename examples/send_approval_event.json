@@ -1,0 +1,10 @@
+{
+  "event_name": "approve_decision",
+  "event_type": "user_action",
+  "payload": {
+    "decision": "approved",
+    "comments": "Report looks good, approved for publication",
+    "approver_id": "manager-456"
+  },
+  "source": "approval_ui"
+}
